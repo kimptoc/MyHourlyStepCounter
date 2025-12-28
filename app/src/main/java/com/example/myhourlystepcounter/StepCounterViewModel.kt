@@ -36,6 +36,9 @@ class StepCounterViewModel(application: Application) : AndroidViewModel(applicat
     private val healthConnectManager = HealthConnectManager(application)
     private var timeUpdateJob: Job? = null
     private var stepUpdateJob: Job? = null
+    private var consecutiveErrors = 0
+    private val baseRetryDelayMs = 1000L // Start with 1 second
+    private val maxRetryDelayMs = 60000L // Max 1 minute
 
     init {
         android.util.Log.d("StepCounterViewModel", "===== VIEWMODEL INIT STARTED =====")
@@ -101,9 +104,28 @@ class StepCounterViewModel(application: Application) : AndroidViewModel(applicat
                 dailySteps = dailySteps,
                 stepHistory = history
             )
+
+            // Reset error count on success
+            if (consecutiveErrors > 0) {
+                android.util.Log.d("StepCounterViewModel", "Recovered from errors after $consecutiveErrors failures")
+                consecutiveErrors = 0
+            }
         } catch (e: Exception) {
-            // Handle errors gracefully
-            e.printStackTrace()
+            // Handle errors with exponential backoff
+            consecutiveErrors++
+            val retryDelay = kotlin.math.min(
+                (baseRetryDelayMs * Math.pow(2.0, (consecutiveErrors - 1).toDouble())).toLong(),
+                maxRetryDelayMs
+            )
+
+            android.util.Log.e(
+                "StepCounterViewModel",
+                "Error updating step counts (attempt #$consecutiveErrors). Will retry in ${retryDelay}ms",
+                e
+            )
+
+            // Wait before next retry
+            delay(retryDelay)
         }
     }
 
@@ -150,11 +172,11 @@ class StepCounterViewModel(application: Application) : AndroidViewModel(applicat
             }
         }
 
-        // Start step count update coroutine (updates every 5 seconds)
+        // Start step count update coroutine (updates immediately then every 5 seconds)
         stepUpdateJob = viewModelScope.launch {
             while (true) {
-                delay(5000) // Update every 5 seconds
-                updateStepCounts()
+                updateStepCounts() // Update immediately
+                delay(5000) // Then wait 5 seconds
             }
         }
     }
@@ -167,6 +189,8 @@ class StepCounterViewModel(application: Application) : AndroidViewModel(applicat
 
     fun resumeUpdates() {
         android.util.Log.d("StepCounterViewModel", "Resuming updates (app foregrounded)")
+        // Reset error count when resuming
+        consecutiveErrors = 0
         if (timeUpdateJob?.isActive != true || stepUpdateJob?.isActive != true) {
             startUpdates()
         }

@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.health.connect.client.PermissionController
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -46,6 +47,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.myhourlystepcounter.ui.theme.MyHourlyStepCounterTheme
 
 class MainActivity : ComponentActivity() {
+    private val stepCounterViewModel: StepCounterViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -54,6 +57,18 @@ class MainActivity : ComponentActivity() {
                 MyHourlyStepCounterApp()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        android.util.Log.d("MainActivity", "onResume - resuming updates")
+        stepCounterViewModel.resumeUpdates()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        android.util.Log.d("MainActivity", "onPause - pausing updates")
+        stepCounterViewModel.pauseUpdates()
     }
 }
 
