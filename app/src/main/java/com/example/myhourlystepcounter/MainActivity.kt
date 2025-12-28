@@ -5,7 +5,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.viewModels
 import androidx.health.connect.client.PermissionController
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -28,12 +27,15 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -47,8 +49,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.myhourlystepcounter.ui.theme.MyHourlyStepCounterTheme
 
 class MainActivity : ComponentActivity() {
-    private val stepCounterViewModel: StepCounterViewModel by viewModels()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -58,24 +58,35 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-
-    override fun onResume() {
-        super.onResume()
-        android.util.Log.d("MainActivity", "onResume - resuming updates")
-        stepCounterViewModel.resumeUpdates()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        android.util.Log.d("MainActivity", "onPause - pausing updates")
-        stepCounterViewModel.pauseUpdates()
-    }
 }
 
 @PreviewScreenSizes
 @Composable
 fun MyHourlyStepCounterApp() {
     var currentDestination by rememberSaveable { mutableStateOf(AppDestinations.HOME) }
+    val sharedViewModel: StepCounterViewModel = viewModel()
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+    // Handle lifecycle events to pause/resume updates
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    android.util.Log.d("MainActivity", "onResume - resuming updates")
+                    sharedViewModel.resumeUpdates()
+                }
+                Lifecycle.Event.ON_PAUSE -> {
+                    android.util.Log.d("MainActivity", "onPause - pausing updates")
+                    sharedViewModel.pauseUpdates()
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     NavigationSuiteScaffold(
         navigationSuiteItems = {
@@ -96,8 +107,14 @@ fun MyHourlyStepCounterApp() {
     ) {
         Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
             when (currentDestination) {
-                AppDestinations.HOME -> StepCounterScreen(modifier = Modifier.padding(innerPadding))
-                AppDestinations.HISTORY -> StepHistoryScreen(modifier = Modifier.padding(innerPadding))
+                AppDestinations.HOME -> StepCounterScreen(
+                    modifier = Modifier.padding(innerPadding),
+                    viewModel = sharedViewModel
+                )
+                AppDestinations.HISTORY -> StepHistoryScreen(
+                    modifier = Modifier.padding(innerPadding),
+                    viewModel = sharedViewModel
+                )
                 AppDestinations.PROFILE -> Greeting(
                     name = "Profile",
                     modifier = Modifier.padding(innerPadding)
@@ -119,7 +136,7 @@ enum class AppDestinations(
 @Composable
 fun StepCounterScreen(
     modifier: Modifier = Modifier,
-    viewModel: StepCounterViewModel = viewModel()
+    viewModel: StepCounterViewModel
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
@@ -376,7 +393,7 @@ fun StepCounterScreen(
 @Composable
 fun StepHistoryScreen(
     modifier: Modifier = Modifier,
-    viewModel: StepCounterViewModel = viewModel()
+    viewModel: StepCounterViewModel
 ) {
     val state by viewModel.state.collectAsState()
 

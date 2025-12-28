@@ -99,6 +99,13 @@ class StepCounterViewModel(application: Application) : AndroidViewModel(applicat
             val hourlyData = healthConnectManager.getHourlyStepsForDay(now)
             val history = buildHistoryList(hourlyData, now.hour)
 
+            android.util.Log.d("StepCounterViewModel", "*** UPDATE COMPLETE ***")
+            android.util.Log.d("StepCounterViewModel", "Current hour: ${now.hour}:00")
+            android.util.Log.d("StepCounterViewModel", "Hourly steps: $hourlySteps")
+            android.util.Log.d("StepCounterViewModel", "Daily steps: $dailySteps")
+            android.util.Log.d("StepCounterViewModel", "History items: ${history.size}")
+            android.util.Log.d("StepCounterViewModel", "**********************")
+
             _state.value = _state.value.copy(
                 hourlySteps = hourlySteps,
                 dailySteps = dailySteps,

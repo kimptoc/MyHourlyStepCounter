@@ -19,6 +19,7 @@ class HealthConnectManager(private val context: Context) {
 
     companion object {
         const val TAG = "HealthConnectManager"
+        const val PREFERRED_DATA_SOURCE = "com.sec.android.app.shealth" // Samsung Health
         val PERMISSIONS = setOf(
             HealthPermission.getReadPermission(StepsRecord::class),
             "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
@@ -40,14 +41,38 @@ class HealthConnectManager(private val context: Context) {
         val startInstant = startOfHour.atZone(zoneId).toInstant()
         val endInstant = startOfHour.plusHours(1).atZone(zoneId).toInstant()
 
-        val response = healthConnectClient.aggregate(
-            AggregateRequest(
-                metrics = setOf(StepsRecord.COUNT_TOTAL),
+        android.util.Log.d(TAG, "====== FETCHING HOURLY STEPS ======")
+        android.util.Log.d(TAG, "Start time: $startOfHour -> $startInstant")
+        android.util.Log.d(TAG, "End time: ${startOfHour.plusHours(1)} -> $endInstant")
+
+        // Manually calculate from individual records (aggregate API has bugs)
+        var manualTotal = 0L
+        try {
+            val readRequest = ReadRecordsRequest(
+                recordType = StepsRecord::class,
                 timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant)
             )
-        )
+            val recordsResponse = healthConnectClient.readRecords(readRequest)
 
-        return response[StepsRecord.COUNT_TOTAL] ?: 0L
+            android.util.Log.d(TAG, "Found ${recordsResponse.records.size} individual step records")
+            recordsResponse.records.forEach { record ->
+                val source = record.metadata.dataOrigin.packageName
+                // Only count records from Samsung Health
+                if (source == PREFERRED_DATA_SOURCE) {
+                    manualTotal += record.count
+                    android.util.Log.d(TAG, "  + ${record.count} steps from $source")
+                } else {
+                    android.util.Log.d(TAG, "  Skipping ${record.count} steps from $source (not preferred source)")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Error reading individual records", e)
+        }
+
+        android.util.Log.d(TAG, "Manual total for hour $startOfHour: $manualTotal steps")
+        android.util.Log.d(TAG, "===================================")
+
+        return manualTotal
     }
 
     suspend fun getStepsForDay(date: LocalDateTime): Long {
@@ -56,14 +81,75 @@ class HealthConnectManager(private val context: Context) {
         val startInstant = startOfDay.atZone(zoneId).toInstant()
         val endInstant = startOfDay.plusDays(1).atZone(zoneId).toInstant()
 
-        val response = healthConnectClient.aggregate(
-            AggregateRequest(
-                metrics = setOf(StepsRecord.COUNT_TOTAL),
-                timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant)
-            )
-        )
+        android.util.Log.d(TAG, "====== FETCHING DAILY STEPS ======")
+        android.util.Log.d(TAG, "Start of day: $startOfDay -> $startInstant")
+        android.util.Log.d(TAG, "End of day: ${startOfDay.plusDays(1)} -> $endInstant")
 
-        return response[StepsRecord.COUNT_TOTAL] ?: 0L
+        // Manually calculate from all individual records with pagination handling
+        var manualTotal = 0L
+        val allRecords = mutableListOf<StepsRecord>()
+        try {
+            var pageToken: String? = null
+            var pageNum = 1
+
+            do {
+                val readRequest = ReadRecordsRequest(
+                    recordType = StepsRecord::class,
+                    timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant),
+                    pageToken = pageToken
+                )
+                val recordsResponse = healthConnectClient.readRecords(readRequest)
+
+                android.util.Log.d(TAG, "Page $pageNum: ${recordsResponse.records.size} records")
+                allRecords.addAll(recordsResponse.records)
+                pageToken = recordsResponse.pageToken
+                pageNum++
+            } while (pageToken != null)
+
+            android.util.Log.d(TAG, "Total records across all pages: ${allRecords.size}")
+
+            // Use a Set to track unique record IDs to avoid double-counting
+            val uniqueRecordIds = mutableSetOf<String>()
+
+            // Group by data source for analysis
+            val stepsBySource = mutableMapOf<String, Long>()
+
+            allRecords.forEach { record ->
+                val recordId = record.metadata.id
+                val source = record.metadata.dataOrigin.packageName
+
+                if (uniqueRecordIds.add(recordId)) {
+                    // Track all sources for analysis
+                    stepsBySource[source] = (stepsBySource[source] ?: 0L) + record.count
+
+                    // Only count records from Samsung Health
+                    if (source == PREFERRED_DATA_SOURCE) {
+                        manualTotal += record.count
+
+                        // Log first 10 and last 10 records for analysis
+                        if (manualTotal <= 10 * 100 || uniqueRecordIds.size > allRecords.size - 10) {
+                            android.util.Log.d(TAG, "  Record #${uniqueRecordIds.size}: ${record.count} steps from $source at ${record.startTime.atZone(zoneId)} to ${record.endTime.atZone(zoneId)}")
+                        }
+                    }
+                } else {
+                    android.util.Log.w(TAG, "Duplicate record detected: $recordId")
+                }
+            }
+
+            android.util.Log.d(TAG, "Unique records: ${uniqueRecordIds.size}")
+            android.util.Log.d(TAG, "Steps by data source (all sources):")
+            stepsBySource.forEach { (source, steps) ->
+                val status = if (source == PREFERRED_DATA_SOURCE) "COUNTED" else "IGNORED"
+                android.util.Log.d(TAG, "  $source: $steps steps [$status]")
+            }
+            android.util.Log.d(TAG, "Manual total for day (Samsung Health only): $manualTotal steps")
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Error reading daily records", e)
+        }
+
+        android.util.Log.d(TAG, "==================================")
+
+        return manualTotal
     }
 
     suspend fun getHourlyStepsForDay(date: LocalDateTime): Map<Int, Long> {
@@ -71,22 +157,37 @@ class HealthConnectManager(private val context: Context) {
         val startOfDay = date.toLocalDate().atStartOfDay()
         val hourlySteps = mutableMapOf<Int, Long>()
 
-        for (hour in 0 until 24) {
-            val startOfHour = startOfDay.plusHours(hour.toLong())
-            val startInstant = startOfHour.atZone(zoneId).toInstant()
-            val endInstant = startOfHour.plusHours(1).atZone(zoneId).toInstant()
+        // Get all records for the day and manually organize by hour with pagination
+        try {
+            val startInstant = startOfDay.atZone(zoneId).toInstant()
+            val endInstant = startOfDay.plusDays(1).atZone(zoneId).toInstant()
 
-            val response = healthConnectClient.aggregate(
-                AggregateRequest(
-                    metrics = setOf(StepsRecord.COUNT_TOTAL),
-                    timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant)
+            val uniqueRecordIds = mutableSetOf<String>()
+            var pageToken: String? = null
+
+            do {
+                val readRequest = ReadRecordsRequest(
+                    recordType = StepsRecord::class,
+                    timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant),
+                    pageToken = pageToken
                 )
-            )
+                val recordsResponse = healthConnectClient.readRecords(readRequest)
 
-            val steps = response[StepsRecord.COUNT_TOTAL] ?: 0L
-            if (steps > 0) {
-                hourlySteps[hour] = steps
-            }
+                // Group steps by hour, avoiding duplicates, only from Samsung Health
+                recordsResponse.records.forEach { record ->
+                    val recordId = record.metadata.id
+                    val source = record.metadata.dataOrigin.packageName
+
+                    if (uniqueRecordIds.add(recordId) && source == PREFERRED_DATA_SOURCE) {
+                        val recordHour = record.startTime.atZone(zoneId).hour
+                        hourlySteps[recordHour] = (hourlySteps[recordHour] ?: 0L) + record.count
+                    }
+                }
+
+                pageToken = recordsResponse.pageToken
+            } while (pageToken != null)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Error reading hourly records for day", e)
         }
 
         return hourlySteps
