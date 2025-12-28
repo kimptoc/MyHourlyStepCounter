@@ -1,11 +1,6 @@
 package com.example.myhourlystepcounter
 
 import android.app.Application
-import android.content.Context
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
@@ -13,60 +8,65 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
 data class HourlyStepRecord(
     val hour: Int,
-    val steps: Int,
+    val steps: Long,
     val hourLabel: String
 )
 
 data class StepCounterState(
     val currentDateTime: String = "",
-    val hourlySteps: Int = 0,
-    val sensorAvailable: Boolean = false,
+    val hourlySteps: Long = 0,
+    val dailySteps: Long = 0,
+    val healthConnectAvailable: Boolean = false,
+    val healthConnectNeedsUpdate: Boolean = false,
+    val healthConnectInstallUri: android.net.Uri? = null,
+    val permissionsGranted: Boolean = false,
     val stepHistory: List<HourlyStepRecord> = emptyList()
 )
 
-class StepCounterViewModel(application: Application) : AndroidViewModel(application), SensorEventListener {
+class StepCounterViewModel(application: Application) : AndroidViewModel(application) {
     private val _state = MutableStateFlow(StepCounterState())
     val state: StateFlow<StepCounterState> = _state.asStateFlow()
 
-    private val sensorManager = application.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    private val stepSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
-
-    private var initialStepCount: Int? = null
-    private var lastHour: Int = -1
-    private var lastDay: Int = -1
-    private var hourStartStepCount: Int? = null
-    private val hourlyStepMap = mutableMapOf<Int, Int>() // Map of hour to step count
-    private var latestStepCount: Int = 0 // Latest step count from sensor
+    private val healthConnectManager = HealthConnectManager(application)
+    private var timeUpdateJob: Job? = null
+    private var stepUpdateJob: Job? = null
 
     init {
-        // Check if step counter sensor is available
-        _state.value = _state.value.copy(sensorAvailable = stepSensor != null)
+        android.util.Log.d("StepCounterViewModel", "===== VIEWMODEL INIT STARTED =====")
 
-        // Register sensor listener
-        stepSensor?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
-        }
+        // Check if Health Connect is available
+        android.util.Log.d("StepCounterViewModel", "About to check Health Connect availability...")
+        val isAvailable = healthConnectManager.isAvailable()
+        val needsUpdate = healthConnectManager.needsUpdate()
+        val installUri = healthConnectManager.getInstallUri()
+        android.util.Log.d("StepCounterViewModel", "Health Connect available: $isAvailable")
+        android.util.Log.d("StepCounterViewModel", "Needs update: $needsUpdate")
+        android.util.Log.d("StepCounterViewModel", "Install URI: $installUri")
+        _state.value = _state.value.copy(
+            healthConnectAvailable = isAvailable,
+            healthConnectNeedsUpdate = needsUpdate,
+            healthConnectInstallUri = installUri
+        )
 
-        // Start time update coroutine (updates every second for time display)
+        // Check permissions
         viewModelScope.launch {
-            while (true) {
-                updateDateTime()
-                delay(1000) // Update every second
+            try {
+                val hasPermissions = healthConnectManager.hasAllPermissions()
+                android.util.Log.d("StepCounterViewModel", "Has permissions: $hasPermissions")
+                _state.value = _state.value.copy(permissionsGranted = hasPermissions)
+            } catch (e: Exception) {
+                android.util.Log.e("StepCounterViewModel", "Error checking permissions", e)
             }
         }
 
-        // Start step count update coroutine (updates every 5 seconds)
-        viewModelScope.launch {
-            while (true) {
-                delay(5000) // Update every 5 seconds
-                updateStepCount()
-            }
-        }
+        // Start time and step update coroutines
+        startUpdates()
     }
 
     private fun updateDateTime() {
@@ -74,83 +74,101 @@ class StepCounterViewModel(application: Application) : AndroidViewModel(applicat
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
         val formattedDateTime = now.format(formatter)
 
-        val currentHour = now.hour
-        val currentDay = now.dayOfYear
-
-        // Check if day has changed - clear history for new day
-        if (lastDay != -1 && lastDay != currentDay) {
-            hourlyStepMap.clear()
-            lastDay = currentDay
-        } else if (lastDay == -1) {
-            lastDay = currentDay
-        }
-
-        // Check if hour has changed
-        if (lastHour != currentHour && lastHour != -1) {
-            // Save the previous hour's step count to history
-            val previousHourSteps = _state.value.hourlySteps
-            hourlyStepMap[lastHour] = previousHourSteps
-
-            // New hour started, reset hourly step count
-            hourStartStepCount = initialStepCount
-
-            // Update history list
-            updateStepHistory(currentHour)
-        }
-
-        lastHour = currentHour
-
         _state.value = _state.value.copy(currentDateTime = formattedDateTime)
     }
 
-    private fun updateStepHistory(currentHour: Int) {
-        // Build history list from stored hourly steps (most recent first)
+    private suspend fun updateStepCounts() {
+        if (!_state.value.permissionsGranted || !_state.value.healthConnectAvailable) {
+            return
+        }
+
+        try {
+            val now = LocalDateTime.now()
+            val startOfCurrentHour = now.withMinute(0).withSecond(0).withNano(0)
+
+            // Get current hour steps
+            val hourlySteps = healthConnectManager.getStepsForHour(startOfCurrentHour)
+
+            // Get daily total steps
+            val dailySteps = healthConnectManager.getStepsForDay(now)
+
+            // Get hourly history for the day
+            val hourlyData = healthConnectManager.getHourlyStepsForDay(now)
+            val history = buildHistoryList(hourlyData, now.hour)
+
+            _state.value = _state.value.copy(
+                hourlySteps = hourlySteps,
+                dailySteps = dailySteps,
+                stepHistory = history
+            )
+        } catch (e: Exception) {
+            // Handle errors gracefully
+            e.printStackTrace()
+        }
+    }
+
+    private fun buildHistoryList(hourlyData: Map<Int, Long>, currentHour: Int): List<HourlyStepRecord> {
         val history = mutableListOf<HourlyStepRecord>()
 
-        // Add hours from current hour back to midnight, excluding current hour
+        // Add hours from previous hour back to midnight (most recent first)
         for (hour in (currentHour - 1) downTo 0) {
-            val steps = hourlyStepMap[hour] ?: 0
-            if (steps > 0 || hourlyStepMap.containsKey(hour)) {
+            val steps = hourlyData[hour] ?: 0L
+            if (steps > 0) {
                 val hourLabel = String.format("%02d:00", hour)
                 history.add(HourlyStepRecord(hour, steps, hourLabel))
             }
         }
 
-        _state.value = _state.value.copy(stepHistory = history)
+        return history
     }
 
-    private fun updateStepCount() {
-        // Calculate hourly steps from the latest sensor reading
-        val hourlySteps = hourStartStepCount?.let { startCount ->
-            latestStepCount - startCount
-        } ?: 0
+    fun refreshPermissions() {
+        viewModelScope.launch {
+            try {
+                android.util.Log.d("StepCounterViewModel", "Refreshing permissions...")
+                val hasPermissions = healthConnectManager.hasAllPermissions()
+                android.util.Log.d("StepCounterViewModel", "Permissions granted: $hasPermissions")
+                _state.value = _state.value.copy(permissionsGranted = hasPermissions)
 
-        _state.value = _state.value.copy(hourlySteps = hourlySteps)
-    }
-
-    override fun onSensorChanged(event: SensorEvent?) {
-        event?.let {
-            if (it.sensor.type == Sensor.TYPE_STEP_COUNTER) {
-                val totalSteps = it.values[0].toInt()
-
-                // Initialize on first reading
-                if (initialStepCount == null) {
-                    initialStepCount = totalSteps
-                    hourStartStepCount = totalSteps
+                if (hasPermissions) {
+                    // Immediately update step counts after getting permissions
+                    android.util.Log.d("StepCounterViewModel", "Updating step counts...")
+                    updateStepCounts()
                 }
-
-                // Store the latest step count (will be used by updateStepCount every 5 seconds)
-                latestStepCount = totalSteps
+            } catch (e: Exception) {
+                android.util.Log.e("StepCounterViewModel", "Error refreshing permissions", e)
             }
         }
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        // Not needed for step counter
+    private fun startUpdates() {
+        // Start time update coroutine (updates every second for time display)
+        timeUpdateJob = viewModelScope.launch {
+            while (true) {
+                updateDateTime()
+                delay(1000) // Update every second
+            }
+        }
+
+        // Start step count update coroutine (updates every 5 seconds)
+        stepUpdateJob = viewModelScope.launch {
+            while (true) {
+                delay(5000) // Update every 5 seconds
+                updateStepCounts()
+            }
+        }
     }
 
-    override fun onCleared() {
-        super.onCleared()
-        sensorManager.unregisterListener(this)
+    fun pauseUpdates() {
+        android.util.Log.d("StepCounterViewModel", "Pausing updates (app backgrounded)")
+        timeUpdateJob?.cancel()
+        stepUpdateJob?.cancel()
+    }
+
+    fun resumeUpdates() {
+        android.util.Log.d("StepCounterViewModel", "Resuming updates (app foregrounded)")
+        if (timeUpdateJob?.isActive != true || stepUpdateJob?.isActive != true) {
+            startUpdates()
+        }
     }
 }

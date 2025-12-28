@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**MyHourlyStepCounter** is an Android application built with Kotlin and Jetpack Compose. It's designed to track hourly step counts with a Material Design 3 interface featuring adaptive navigation.
+**MyHourlyStepCounter** is an Android application built with Kotlin and Jetpack Compose.
+It's designed to track hourly step counts with a Material Design 3 interface featuring adaptive navigation.
+It should use the Health Connect API to get current and historical figures.
+It should also show the total steps for the current day, lower down on the screen in smaller font than the hourly count.
 This application should show the date time including minutes and seconds.
 At the start of each hour, it should show zero steps taken
 As the hour progress, it should show the number of steps taken in that hour. It should be update every 5 seconds with the latest step total for that hour.
